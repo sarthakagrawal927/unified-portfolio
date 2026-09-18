@@ -1,0 +1,110 @@
+{
+  "$schema": "fleet.design-review.v1",
+  "version": 1,
+  "project": "unified-portfolio",
+  "target": "Portfolio dashboard",
+  "surfaceMode": "operate",
+  "mode": "overhaul",
+  "register": "product",
+  "context": {
+    "product": "PRODUCT.md",
+    "design": "DESIGN.md"
+  },
+  "direction": {
+    "references": [],
+    "probes": [],
+    "selected": "agent-selected",
+    "approval": "agent-selected",
+    "before": "",
+    "library": {
+      "strategy": "upstream-first",
+      "primary": "preline",
+      "sources": [
+        "https://preline.co/docs/components/sidebar.html",
+        "https://preline.co/docs/components/tables.html",
+        "https://preline.co/license.html"
+      ],
+      "runtime": "none",
+      "customReplacement": {
+        "used": false,
+        "authorization": "not-required",
+        "reason": ""
+      }
+    },
+    "contract": {
+      "purpose": "Unified Portfolio helps its owner understand investments across brokers through one normalized read-only backend.",
+      "purposeSource": "PRODUCT.md and owner PRD in GitHub issue #1",
+      "canonicalPurpose": "Unified Portfolio helps its owner understand investments across brokers through one normalized read-only backend.",
+      "purposeAlignment": "match",
+      "driftNote": "",
+      "audience": "Owner reviewing personal investments across three providers",
+      "job": "Read holdings and source health, reconnect expired accounts, inspect stored history",
+      "thesis": "A quiet personal investment ledger with explicit currency and source freshness",
+      "system": "Warm canvas, forest green actions, amber warnings, system sans controls, serif headings and tabular values; responsive Preline table/sidebar structure",
+      "signature": "Source ledger beside each currency valuation and per-provider observation time",
+      "risk": "Native-currency totals require more reading than one number, preserving accuracy until FX support is qualified"
+    }
+  },
+  "evidence": {
+    "screenshots": [
+      {
+        "width": 390,
+        "path": "artifacts/design/after-390.png"
+      },
+      {
+        "width": 768,
+        "path": "artifacts/design/after-768.png"
+      },
+      {
+        "width": 1440,
+        "path": "artifacts/design/after-1440.png"
+      }
+    ],
+    "projectCheck": {
+      "command": "pnpm test && pnpm check && pnpm build && node scripts/browser-check.mjs",
+      "status": "pass"
+    },
+    "critique": {
+      "score": 34,
+      "maximum": 40
+    },
+    "audit": {
+      "score": 17,
+      "maximum": 20
+    },
+    "unresolved": {
+      "p0": 0,
+      "p1": 0
+    },
+    "detector": {
+      "posture": "advisory",
+      "findings": []
+    },
+    "comprehension": {
+      "status": "not-applicable",
+      "reviewer": "Independent design_review and ui_audit agents",
+      "answers": {
+        "product": "",
+        "audience": "",
+        "value": "",
+        "mechanism": "",
+        "proof": "",
+        "nextAction": ""
+      },
+      "purposeScore": {
+        "product": 0,
+        "audience": 0,
+        "value": 0,
+        "mechanism": 0,
+        "proof": 0,
+        "nextAction": 0,
+        "total": 0
+      },
+      "mismatches": []
+    }
+  },
+  "ownerFeedback": {
+    "decision": "agent-selected",
+    "note": "Owner asked to build the supplied PRD. Agent selected the private ledger direction. Independent design review 34/40 and technical UI audit 17/20; 0 P0/P1. Optional P3 palette/token and allocation-render optimizations remain."
+  }
+}

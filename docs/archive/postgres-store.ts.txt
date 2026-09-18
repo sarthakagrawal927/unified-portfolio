@@ -1,0 +1,396 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import { userId, currentUser } from "../server/tenant";
+import postgres from "postgres";
+import { drizzle } from "drizzle-orm/postgres-js";
+import { and, eq, gt, lt, sql } from "drizzle-orm";
+import * as tables from "./schema";
+import { decrypt, encrypt, hash, randomToken } from "../server/crypto";
+import {
+  providers,
+  SnapshotSchema,
+  type Authorization,
+  type Connection,
+  type ProviderId,
+  type Snapshot,
+} from "../core/model";
+let instance: ReturnType<typeof drizzle<typeof tables>> | undefined;
+export function setDatabaseForTests(value: unknown) {
+  if (process.env.NODE_ENV !== "test")
+    throw new Error("Test database injection forbidden");
+  instance = value as typeof instance;
+}
+type Database = ReturnType<typeof drizzle<typeof tables>>;
+type RequestDatabase = { url?: string; database?: Database; client?: ReturnType<typeof postgres> };
+const requestDatabase = new AsyncLocalStorage<RequestDatabase>();
+export function databaseConfigured() {
+  return Boolean(requestDatabase.getStore()?.url || process.env.DATABASE_URL);
+}
+export async function withDatabaseConnection<T>(url: string | undefined, run: () => Promise<T>) {
+  const state: RequestDatabase = { url };
+  return requestDatabase.run(state, async () => {
+    try { return await run(); }
+    finally { if (state.client) await state.client.end({ timeout: 5 }); }
+  });
+}
+export function db() {
+  const scope = requestDatabase.getStore();
+  if (scope) {
+    if (scope.database) return scope.database;
+    const url = scope.url || process.env.DATABASE_URL;
+    if (!url) throw new Error("Database setup required");
+    scope.client = postgres(url, { max: 5, prepare: false });
+    return scope.database = drizzle(scope.client, { schema: tables });
+  }
+  if (instance) return instance;
+  if (!process.env.DATABASE_URL) throw new Error("Database setup required");
+  return (instance ??= drizzle(postgres(process.env.DATABASE_URL, { max: 5, prepare: false }), { schema: tables }));
+}
+export async function connectionList(): Promise<Connection[]> {
+  const rows = await db()
+    .select()
+    .from(tables.connections)
+    .where(eq(tables.connections.userId, userId()));
+  return providers.map((id) => {
+    const r = rows.find((r) => r.id === id);
+    return {
+      id,
+      status: (r?.status as Connection["status"]) || "NEEDS_LOGIN",
+      connected: r?.connected || false,
+      lastAttemptAt: r?.lastAttemptAt?.toISOString() || null,
+      lastSuccessAt: r?.lastSuccessAt?.toISOString() || null,
+      errorCode: r?.errorCode || null,
+      generation: r?.generation || 0,
+      expiresAt: r?.expiresAt?.toISOString() || null,
+    };
+  });
+}
+export async function activeSnapshots(): Promise<Snapshot[]> {
+  const rows = await db()
+    .select({ data: tables.snapshots.data })
+    .from(tables.connections)
+    .innerJoin(
+      tables.snapshots,
+      and(
+        eq(tables.connections.activeSnapshotId, tables.snapshots.id),
+        eq(tables.snapshots.userId, userId()),
+      ),
+    )
+    .where(eq(tables.connections.userId, userId()));
+  return rows.map((r) => SnapshotSchema.parse(r.data));
+}
+export async function saveAuthorization(
+  id: ProviderId,
+  auth: Authorization,
+  expectedGeneration: number,
+) {
+  return db().transaction(async (tx) => {
+    await tx
+      .insert(tables.connections)
+      .values({ id, userId: userId() })
+      .onConflictDoNothing();
+    const rows = await tx
+      .update(tables.connections)
+      .set({
+        credentials: encrypt(auth),
+        connected: true,
+        status: "CONNECTED",
+        errorCode: null,
+        expiresAt: auth.expiresAt ? new Date(auth.expiresAt) : null,
+        generation: expectedGeneration + 1,
+        leaseUntil: null,
+      })
+      .where(
+        and(
+          and(
+            eq(tables.connections.userId, userId()),
+            eq(tables.connections.id, id),
+          ),
+          eq(tables.connections.generation, expectedGeneration),
+        ),
+      )
+      .returning();
+    return rows.length === 1;
+  });
+}
+export async function disconnect(id: ProviderId) {
+  await db()
+    .insert(tables.connections)
+    .values({ id, userId: userId() })
+    .onConflictDoNothing();
+  await db()
+    .update(tables.connections)
+    .set({
+      credentials: null,
+      connected: false,
+      status: "NEEDS_LOGIN",
+      errorCode: null,
+      expiresAt: null,
+      leaseUntil: null,
+      generation: sql`${tables.connections.generation} + 1`,
+    })
+    .where(
+      and(
+        eq(tables.connections.userId, userId()),
+        eq(tables.connections.id, id),
+      ),
+    );
+}
+export async function acquire(id: ProviderId) {
+  return db().transaction(async (tx) => {
+    const [r] = await tx
+      .select()
+      .from(tables.connections)
+      .where(
+        and(
+          eq(tables.connections.userId, userId()),
+          eq(tables.connections.id, id),
+        ),
+      )
+      .for("update");
+    if (
+      !r?.credentials ||
+      !r.connected ||
+      (r.leaseUntil && r.leaseUntil > new Date())
+    )
+      return null;
+    const generation = r.generation + 1;
+    await tx
+      .update(tables.connections)
+      .set({
+        status: "SYNCING",
+        generation,
+        lastAttemptAt: new Date(),
+        leaseUntil: new Date(Date.now() + 120_000),
+      })
+      .where(
+        and(
+          eq(tables.connections.userId, userId()),
+          eq(tables.connections.id, id),
+        ),
+      );
+    return { generation, auth: decrypt<Authorization>(r.credentials) };
+  });
+}
+export async function publish(
+  id: ProviderId,
+  generation: number,
+  snapshot: Snapshot,
+  auth: Authorization,
+  durationMs: number,
+) {
+  await db().transaction(async (tx) => {
+    const [r] = await tx
+      .select()
+      .from(tables.connections)
+      .where(
+        and(
+          eq(tables.connections.userId, userId()),
+          eq(tables.connections.id, id),
+        ),
+      )
+      .for("update");
+    if (!r?.connected || r.generation !== generation) return;
+    const snapshotId = randomToken();
+    await tx.insert(tables.snapshots).values({
+      id: snapshotId,
+      userId: userId(),
+      provider: id,
+      asOf: new Date(snapshot.asOf),
+      data: snapshot,
+    });
+    await tx
+      .update(tables.connections)
+      .set({
+        activeSnapshotId: snapshotId,
+        status: "CONNECTED",
+        errorCode: null,
+        lastSuccessAt: new Date(),
+        leaseUntil: null,
+        credentials: encrypt(auth),
+        expiresAt: auth.expiresAt ? new Date(auth.expiresAt) : null,
+      })
+      .where(
+        and(
+          eq(tables.connections.userId, userId()),
+          eq(tables.connections.id, id),
+        ),
+      );
+    await tx.insert(tables.syncRuns).values({
+      id: randomToken(),
+      userId: userId(),
+      provider: id,
+      startedAt: new Date(Date.now() - durationMs),
+      durationMs,
+      success: true,
+      version: snapshot.version,
+    });
+  });
+}
+export async function fail(
+  id: ProviderId,
+  generation: number,
+  code: string,
+  needsLogin: boolean,
+  durationMs: number,
+) {
+  await db().transaction(async (tx) => {
+    const rows = await tx
+      .update(tables.connections)
+      .set({
+        status: needsLogin ? "NEEDS_LOGIN" : "ERROR",
+        errorCode: code,
+        leaseUntil: null,
+      })
+      .where(
+        and(
+          and(
+            eq(tables.connections.userId, userId()),
+            eq(tables.connections.id, id),
+          ),
+          eq(tables.connections.generation, generation),
+        ),
+      )
+      .returning();
+    if (rows.length)
+      await tx.insert(tables.syncRuns).values({
+        id: randomToken(),
+        userId: userId(),
+        provider: id,
+        startedAt: new Date(Date.now() - durationMs),
+        durationMs,
+        success: false,
+        errorCode: code,
+      });
+  });
+}
+export async function putRecord(
+  kind: string,
+  id: string,
+  data: unknown,
+  seconds: number,
+) {
+  await db()
+    .insert(tables.authRecords)
+    .values({
+      id: hash(kind + ":" + id),
+      kind,
+      userId: currentUser(),
+      data: encrypt(data),
+      expiresAt: new Date(Date.now() + seconds * 1000),
+    })
+    .onConflictDoUpdate({
+      target: tables.authRecords.id,
+      set: {
+        data: encrypt(data),
+        expiresAt: new Date(Date.now() + seconds * 1000),
+      },
+    });
+}
+export async function record<T>(
+  kind: string,
+  id: string,
+  consume = false,
+): Promise<T | null> {
+  const where = and(
+    eq(tables.authRecords.id, hash(kind + ":" + id)),
+    eq(tables.authRecords.kind, kind),
+    gt(tables.authRecords.expiresAt, new Date()),
+  );
+  const rows = consume
+    ? await db().delete(tables.authRecords).where(where).returning()
+    : await db().select().from(tables.authRecords).where(where);
+  return rows[0] ? decrypt<T>(rows[0].data) : null;
+}
+export async function removeRecord(kind: string, id: string) {
+  await db()
+    .delete(tables.authRecords)
+    .where(eq(tables.authRecords.id, hash(kind + ":" + id)));
+}
+export async function history(start = "0000-00-00", end = "9999-99-99") {
+  const rows = await db()
+    .select()
+    .from(tables.dailySnapshots)
+    .where(eq(tables.dailySnapshots.userId, userId()))
+    .orderBy(tables.dailySnapshots.day);
+  return rows
+    .filter((r) => r.day >= start && r.day <= end)
+    .map((r) => ({ day: r.day, ...(r.data as object) }));
+}
+export async function dailySnapshot(day: string, data: unknown) {
+  await db()
+    .insert(tables.dailySnapshots)
+    .values({ day, userId: userId(), data, createdAt: new Date() })
+    .onConflictDoNothing();
+  await db()
+    .delete(tables.authRecords)
+    .where(lt(tables.authRecords.expiresAt, new Date()));
+}
+
+export async function rateLimit(key: string, max: number, seconds: number) {
+  const bucket = Math.floor(Date.now() / (seconds * 1000));
+  const id = hash((currentUser() || "public") + ":" + key + ":" + bucket);
+  const [row] = await db()
+    .insert(tables.rateLimits)
+    .values({
+      id,
+      count: 1,
+      expiresAt: new Date((bucket + 1) * seconds * 1000),
+    })
+    .onConflictDoUpdate({
+      target: tables.rateLimits.id,
+      set: { count: sql`${tables.rateLimits.count} + 1` },
+    })
+    .returning();
+  return row.count <= max;
+}
+
+export async function updateAuthorization(
+  id: ProviderId,
+  generation: number,
+  auth: Authorization,
+) {
+  await db()
+    .update(tables.connections)
+    .set({
+      credentials: encrypt(auth),
+      expiresAt: auth.expiresAt ? new Date(auth.expiresAt) : null,
+    })
+    .where(
+      and(
+        and(
+          eq(tables.connections.userId, userId()),
+          eq(tables.connections.id, id),
+        ),
+        eq(tables.connections.generation, generation),
+        eq(tables.connections.connected, true),
+      ),
+    );
+}
+export async function revokeMcp() {
+  await mcpEpoch();
+  await db()
+    .update(tables.securityState)
+    .set({ epoch: sql`${tables.securityState.epoch} + 1` })
+    .where(eq(tables.securityState.id, "mcp:" + userId()));
+  for (const kind of ["access", "refresh", "code", "consent"])
+    await db()
+      .delete(tables.authRecords)
+      .where(
+        and(
+          eq(tables.authRecords.kind, kind),
+          eq(tables.authRecords.userId, userId()),
+        ),
+      );
+}
+
+export async function mcpEpoch() {
+  await db()
+    .insert(tables.securityState)
+    .values({ id: "mcp:" + userId(), epoch: 0 })
+    .onConflictDoNothing();
+  const [row] = await db()
+    .select()
+    .from(tables.securityState)
+    .where(eq(tables.securityState.id, "mcp:" + userId()));
+  return row.epoch;
+}

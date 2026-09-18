@@ -1,0 +1,78 @@
+import {
+  pgTable,
+  text,
+  integer,
+  boolean,
+  jsonb,
+  timestamp,
+  index,
+  primaryKey,
+} from "drizzle-orm/pg-core";
+import type { Snapshot } from "../core/model";
+export const connections = pgTable(
+  "connections",
+  {
+    id: text().notNull(),
+    userId: text().notNull(),
+    status: text().notNull().default("NEEDS_LOGIN"),
+    connected: boolean().notNull().default(false),
+    credentials: text(),
+    generation: integer().notNull().default(0),
+    lastAttemptAt: timestamp({ withTimezone: true }),
+    lastSuccessAt: timestamp({ withTimezone: true }),
+    expiresAt: timestamp({ withTimezone: true }),
+    errorCode: text(),
+    leaseUntil: timestamp({ withTimezone: true }),
+    activeSnapshotId: text(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.id] })],
+);
+export const snapshots = pgTable(
+  "snapshots",
+  {
+    id: text().primaryKey(),
+    userId: text().notNull(),
+    provider: text().notNull(),
+    asOf: timestamp({ withTimezone: true }).notNull(),
+    data: jsonb().$type<Snapshot>().notNull(),
+  },
+  (t) => [index("snapshot_provider_time").on(t.provider, t.asOf)],
+);
+export const dailySnapshots = pgTable(
+  "daily_snapshots",
+  {
+    day: text().notNull(),
+    userId: text().notNull(),
+    data: jsonb().notNull(),
+    createdAt: timestamp({ withTimezone: true }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.day] })],
+);
+export const authRecords = pgTable("auth_records", {
+  id: text().primaryKey(),
+  userId: text(),
+  kind: text().notNull(),
+  data: text().notNull(),
+  expiresAt: timestamp({ withTimezone: true }).notNull(),
+});
+export const syncRuns = pgTable("sync_runs", {
+  id: text().primaryKey(),
+  userId: text().notNull(),
+  provider: text().notNull(),
+  startedAt: timestamp({ withTimezone: true }).notNull(),
+  durationMs: integer().notNull(),
+  success: boolean().notNull(),
+  errorCode: text(),
+  version: text(),
+});
+
+export const rateLimits = pgTable("rate_limits", {
+  id: text().primaryKey(),
+  count: integer().notNull(),
+  expiresAt: timestamp({ withTimezone: true }).notNull(),
+});
+
+export const securityState = pgTable("security_state", {
+  id: text().primaryKey(),
+  epoch: integer().notNull().default(0),
+});
