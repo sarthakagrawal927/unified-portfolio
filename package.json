@@ -15,11 +15,11 @@
     "dev:vinext": "vinext dev --port 3001",
     "build:vinext": "vinext build",
     "start:vinext": "wrangler dev --config dist/server/wrangler.json",
-    "deploy:vinext": "vinext-cloudflare deploy --config dist/server/wrangler.json",
+    "deploy:vinext": "vinext-cloudflare deploy --config dist/server/wrangler.json --tag \"$(git rev-parse HEAD)\"",
     "db:migrate:local": "wrangler d1 migrations apply unified-portfolio --local",
     "dev:next": "next dev --hostname 127.0.0.1 --port 3042",
     "build:next": "next build",
-    "deploy": "wrangler deploy --config dist/server/wrangler.json"
+    "deploy": "wrangler deploy --config dist/server/wrangler.json --tag \"$(git rev-parse HEAD)\""
   },
   "dependencies": {
     "@cfworker/json-schema": "^4.1.1",
