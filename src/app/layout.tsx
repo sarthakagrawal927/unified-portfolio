@@ -17,6 +17,16 @@ export default async function Layout({
   const signedIn = Boolean(await ownerSession());
   return (
     <html lang="en">
+      <head>
+        <script
+          defer
+          src="https://health.sassmaker.com/tracker.js"
+          data-key="ahk_pub_a5f420d99d3c8a9dad6e30bb188989248c445cac80cc0aa011399d11b3b79678"
+          data-project="app-72bfc54f-c331-409f-b486-ca1382e53e98"
+          data-identity="persistent"
+          data-endpoint="https://ingest.sassmaker.com/v1/browser"
+        />
+      </head>
       <body>
         <a className="skip" href="#main">
           Skip to content
