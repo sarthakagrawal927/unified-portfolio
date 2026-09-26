@@ -22,14 +22,14 @@
   },
   "triggers": {
     "crons": [
-      "*/15 * * * *"
+      "0 6,12,18,23 * * *"
     ]
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "unified-portfolio",
-      "database_id": "bd1a2b65-7ab1-4ded-93f4-bfb2c3ca127f",
+      "database_id": "19aef49b-923e-4226-a0b8-891d5e660036",
       "migrations_dir": "migrations"
     }
   ],
